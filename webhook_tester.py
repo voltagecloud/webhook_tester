@@ -8,15 +8,53 @@ import hmac
 import base64
 from datetime import datetime
 from typing import Dict, Any, Optional, List, cast
+import logging
+import os
+import sys
+
+
+# Create a custom formatter for cleaner output
+class WebhookFormatter(logging.Formatter):
+    def __init__(self):
+        super().__init__()
+        # We'll use different formats based on log level
+        self.info_fmt = "%(message)s"
+        self.debug_fmt = "  %(message)s"  # Indented for readability
+        self.error_fmt = "ERROR: %(message)s"
+
+    def format(self, record):
+        # Save the original format
+        original_fmt = self._style._fmt
+
+        # Apply different format based on log level
+        if record.levelno == logging.DEBUG:
+            self._style._fmt = self.debug_fmt
+        elif record.levelno == logging.INFO:
+            self._style._fmt = self.info_fmt
+        elif record.levelno in (logging.ERROR, logging.WARNING):
+            self._style._fmt = self.error_fmt
+
+        # Format the message
+        result = super().format(record)
+
+        # Restore the original format
+        self._style._fmt = original_fmt
+
+        return result
 
 
 class WebhookServer(socketserver.TCPServer):
     """Custom TCPServer that stores received webhooks and verification info."""
 
-    def __init__(self, server_address, RequestHandlerClass, shared_secret=None, verbose=False):
+    def __init__(self, server_address, RequestHandlerClass, shared_secret=None, output_file=None, truncate_output=False):
         self.shared_secret: Optional[str] = shared_secret
-        self.verbose: bool = verbose
         self.received_webhooks: List[Dict[str, Any]] = []
+        self.output_file: Optional[str] = output_file
+
+        if output_file and truncate_output:
+            with open(output_file, 'w') as f:
+                f.write('[]')
+
         super().__init__(server_address, RequestHandlerClass)
 
 
@@ -26,17 +64,14 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         content_length = int(self.headers.get('Content-Length', 0))
 
-        # Read request body
         body = self.rfile.read(content_length).decode('utf-8')
         payload = json.loads(body) if body else {}
 
-        # Get headers - convert to dict for easier handling
         headers_dict = dict(self.headers.items())
         signature = headers_dict.get('x-voltage-signature')
         timestamp = headers_dict.get('x-voltage-timestamp')
         event_type = headers_dict.get('x-voltage-event')
 
-        # Store request details
         webhook_data = {
             'timestamp': datetime.now().isoformat(),
             'path': self.path,
@@ -46,31 +81,56 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
             'event_type': event_type,
         }
 
-        # Get server instance (explicitly cast to our custom server type)
         server = cast(WebhookServer, self.server)
         server.received_webhooks.append(webhook_data)
 
-        # Log the webhook
-        if server.verbose:
-            print(f"\n{'=' * 50}")
-            print(f"WEBHOOK RECEIVED ({len(server.received_webhooks)})")
-            print(f"Time: {webhook_data['timestamp']}")
-            print(f"Path: {self.path}")
-            print(f"Event Type: {event_type}")
-            print("\nHeaders:")
+        # Verify signature (only once)
+        signature_valid = None
+        if server.shared_secret is not None and signature is not None and timestamp is not None:
+            signature_valid = self.verify_signature(body, signature, timestamp, server.shared_secret)
+            webhook_data['signature_valid'] = signature_valid
+
+        # Log webhook info in a cleaner format
+        logging.info("=" * 60)
+        logging.info(f"WEBHOOK #{len(server.received_webhooks)} RECEIVED: {event_type or 'Unknown'}")
+        logging.info(f"Time: {webhook_data['timestamp']}")
+
+        if signature_valid is not None:
+            status = "✓ VALID" if signature_valid else "✗ INVALID"
+            logging.info(f"Signature: {status}")
+
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            logging.debug(f"Path: {self.path}")
+            logging.debug("Headers:")
             for key, value in headers_dict.items():
-                print(f"  {key}: {value}")
-            print("\nPayload:")
-            print(json.dumps(payload, indent=2))
+                logging.debug(f"{key}: {value}")
+            logging.debug("Payload:")
+            payload_json = json.dumps(payload, indent=2)
+            # Indent each line of the payload for better readability
+            for line in payload_json.split('\n'):
+                logging.debug(line)
 
-            # If shared secret is provided, verify signature
-            if server.shared_secret is not None and signature is not None and timestamp is not None:
-                is_valid = self.verify_signature(body, signature, timestamp, server.shared_secret)
-                print(f"\nSignature verification: {'✓ VALID' if is_valid else '✗ INVALID'}")
+        logging.info("=" * 60 + "\n")
 
-            print(f"{'=' * 50}\n")
+        if server.output_file:
+            try:
+                try:
+                    with open(server.output_file, 'r') as f:
+                        try:
+                            existing_webhooks = json.load(f)
+                        except json.JSONDecodeError:
+                            existing_webhooks = []
+                except FileNotFoundError:
+                    existing_webhooks = []
 
-        # Send response
+                existing_webhooks.append(webhook_data)
+
+                with open(server.output_file, 'w') as f:
+                    json.dump(existing_webhooks, f, indent=2)
+
+            except Exception as e:
+                logging.error(f"Failed to write to output file: {e}")
+
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
         self.end_headers()
@@ -79,6 +139,10 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
             "message": "Webhook received successfully"
         })
         self.wfile.write(response.encode('utf-8'))
+
+    # Suppress server logs
+    def log_message(self, format, *args):
+        return
 
     @staticmethod
     def verify_signature(payload: str, signature: str, timestamp: str, shared_secret: str) -> bool:
@@ -97,7 +161,7 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
         try:
             # Ensure shared_secret is not None or empty
             if not shared_secret:
-                print("Cannot verify signature: shared_secret is None or empty")
+                logging.warning("Cannot verify signature: shared_secret is None or empty")
                 return False
 
             # Create message from payload and timestamp
@@ -116,59 +180,110 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
             # Compare signatures
             return hmac.compare_digest(expected_signature, signature)
         except Exception as e:
-            print(f"Error verifying signature: {e}")
+            logging.error(f"Error verifying signature: {e}")
             return False
+
+
+def create_default_config(config_path):
+    """Create a default configuration file if it doesn't exist."""
+    default_config = {
+        "host": "localhost",
+        "port": 7999,
+        "secret": None,
+        "output_file": "webhooks.json",
+        "truncate_output": False,
+        "log_level": "INFO"
+    }
+
+    # Create directory if it doesn't exist
+    os.makedirs(os.path.dirname(os.path.abspath(config_path)), exist_ok=True)
+
+    with open(config_path, 'w') as f:
+        json.dump(default_config, f, indent=2)
+
+    print(f"Created default configuration file at: {config_path}")
+    return default_config
+
+
+def setup_logging(level):
+    """Set up custom logging configuration"""
+    root_logger = logging.getLogger()
+    root_logger.setLevel(level)
+
+    # Remove existing handlers
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+
+    # Create custom handler with our formatter
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(WebhookFormatter())
+    root_logger.addHandler(handler)
 
 
 def main():
     parser = argparse.ArgumentParser(description='Simple webhook receiver for testing webhooks')
-    parser.add_argument('--port', type=int, default=8000, help='Port to listen on (default: 8000)')
-    parser.add_argument('--host', type=str, default='localhost', help='Host to bind to (default: localhost)')
-    parser.add_argument('--secret', type=str, help='Shared secret for signature verification')
-    parser.add_argument('--verbose', '-v', action='store_true', help='Verbose output')
+    parser.add_argument('--config', type=str, default='webhook_config.json', help='Configuration file path')
 
     args = parser.parse_args()
 
-    # Default to verbose output if not specified
-    verbose = True if args.verbose is None else args.verbose
+    if not os.path.exists(args.config):
+        config = create_default_config(args.config)
+    else:
+        try:
+            with open(args.config, 'r') as f:
+                config = json.load(f)
+        except json.JSONDecodeError:
+            print(f"Invalid JSON in configuration file: {args.config}. Creating new default config.")
+            config = create_default_config(args.config)
 
-    # Create server with shared secret
+    log_level_name = config.get('log_level', 'INFO').upper()
+    log_level = getattr(logging, log_level_name, logging.INFO)
+
+    # Set up custom logging
+    setup_logging(log_level)
+
+    host = config.get('host', 'localhost')
+    port = config.get('port', 7999)
+    secret = config.get('secret')
+    output_file = config.get('output_file', 'webhooks.json')
+    truncate_output = config.get('truncate_output', False)
+
     server = WebhookServer(
-        (args.host, args.port),
+        (host, port),
         WebhookHandler,
-        shared_secret=args.secret,
-        verbose=verbose
+        shared_secret=secret,
+        output_file=output_file,
+        truncate_output=truncate_output
     )
 
-    # Start server
-    print(f"Starting webhook server on http://{args.host}:{args.port}")
-    print(f"Shared secret {'configured' if args.secret else 'not configured'}")
-    print("Press Ctrl+C to stop the server")
+    logging.info(f"Starting webhook server on http://{host}:{port}")
+    logging.info(f"Log level: {log_level_name}")
+    logging.info(f"Shared secret {'configured' if secret else 'not configured'}")
+    logging.info(f"Writing webhooks to {output_file}")
+    logging.info("Press Ctrl+C to stop the server\n")
 
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\nShutting down webhook server...")
+        logging.info("\nShutting down webhook server...")
 
         if server.received_webhooks:
-            print(f"\nReceived {len(server.received_webhooks)} webhooks:")
+            logging.info(f"Received {len(server.received_webhooks)} webhooks during this session")
             for i, webhook in enumerate(server.received_webhooks, 1):
                 event_type = webhook.get('event_type', 'Unknown')
                 path = webhook.get('path', '/')
                 timestamp = webhook.get('timestamp', 'Unknown')
-                print(f"{i}. {event_type} - {path} - {timestamp}")
-
-            save = input("\nDo you want to save received webhooks to a file? (y/n): ")
-            if save.lower() == 'y':
-                filename = input("Enter filename (default: webhooks.json): ") or "webhooks.json"
-                with open(filename, 'w') as f:
-                    json.dump(server.received_webhooks, f, indent=2)
-                print(f"Webhooks saved to {filename}")
+                logging.info(f"  {i}. {event_type} - {path} - {timestamp}")
         else:
-            print("No webhooks were received during this session.")
+            logging.info("No webhooks were received during this session.")
+
 
         server.server_close()
-        print("Server stopped.")
+        logging.info("Server stopped.")
+
+    except Exception as e:
+        logging.error(f"Server error: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

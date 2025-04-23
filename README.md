@@ -12,7 +12,7 @@ Webhook Tester is a lightweight HTTP server that listens for incoming webhook re
 - **Real-time Display**: View incoming webhook payloads, headers, and metadata in real-time
 - **Signature Verification**: Verify webhook signatures using HMAC-SHA256
 - **Data Export**: Save received webhooks to a JSON file for later analysis
-- **Customizable**: Configure host, port, and shared secret via command-line options
+- **Configurable**: Set host, port, logging level, and shared secret via configuration file
 
 ## Requirements
 
@@ -31,59 +31,68 @@ chmod +x webhook_tester.py
 
 ### Basic Usage
 
-Start the webhook receiver on the default port (8000):
+Start the webhook receiver with default settings:
 
 ```bash
 python webhook_tester.py
 ```
 
-### Command-line Options
+This will:
+- Start the server on `localhost:7999`
+- Save received webhooks to `webhooks.json`
+- Use INFO level logging
 
-```bash
-python webhook_tester.py [OPTIONS]
+### Example output:
+![Example output](./ksnip_20250423-094034.png)
+
+### Configuration File
+
+The script uses a JSON configuration file (default: `webhook_config.json`). If the file doesn't exist, a default one will be created automatically with these settings:
+
+```json
+{
+  "host": "localhost",
+  "port": 7999,
+  "secret": null,
+  "output_file": "webhooks.json",
+  "truncate_output": false,
+  "log_level": "INFO"
+}
 ```
 
-Available options:
+You can customize:
+- `host`: Host address to bind to
+- `port`: Port to listen on
+- `secret`: Shared secret for signature verification
+- `output_file`: Path to save received webhooks
+- `truncate_output`: Whether to clear the output file on startup
+- `log_level`: Logging level (INFO, DEBUG, ERROR)
 
-- `--host HOST`: Host address to bind to (default: localhost)
-- `--port PORT`: Port to listen on (default: 8000)
-- `--secret SECRET`: Shared secret for signature verification
-- `--verbose, -v`: Enable verbose output (shows detailed webhook information)
+### Using a Custom Configuration
 
-### Examples
-
-Listen on port 9000:
 ```bash
-python webhook_tester.py --port 9000
-```
-
-Listen on all interfaces:
-```bash
-python webhook_tester.py --host 0.0.0.0
-```
-
-Configure a shared secret for signature verification:
-```bash
-python webhook_tester.py --secret your_webhook_shared_secret
+python webhook_tester.py --config my_custom_config.json
 ```
 
 ### Using with External Services
 
-To receive webhooks from external services, you'll need to expose your local server to the internet. You can use a tool like [ngrok](https://ngrok.com/):
+To receive webhooks from external services, you'll need to expose your local server to the internet. You can use a tool like [localtunnel](https://theboroer.github.io/localtunnel-www/):
 
 ```bash
-# Install ngrok if you haven't already
+# Install localtunnel if you haven't already
+npm install -g localtunnel
+
 # Then expose your webhook tester
-ngrok http 8000
+lt --port 7999
 ```
 
-Use the URL provided by ngrok as your webhook endpoint in the external service.
+Use the URL provided by localtunnel as your webhook endpoint in the external service.
 
 ## Signature Verification
 
 The webhook tester supports signature verification using HMAC-SHA256. To verify signatures:
 
-1. Start the tester with the `--secret` option
+1. Add a `secret` value in your configuration file
 2. Ensure your webhook source is sending the following headers:
    - `x-voltage-signature`: Base64-encoded HMAC-SHA256 signature
    - `x-voltage-timestamp`: Timestamp used in the signature calculation
@@ -95,29 +104,33 @@ HMAC-SHA256(shared_secret, payload_string + "." + timestamp)
 
 ## Reading Webhook Data
 
-When a webhook is received, the following information is displayed (if verbose mode is enabled):
+When a webhook is received, the following information is displayed:
 
+- Webhook number and event type
 - Timestamp when the webhook was received
+- Signature verification result (if a secret is configured)
+
+In DEBUG mode, additional information is shown:
 - Request path
-- Event type (from the `x-voltage-event` header)
 - All request headers
 - Full JSON payload
-- Signature verification result (if applicable)
 
 ## Saving Webhook Data
 
-When you stop the webhook tester (by pressing Ctrl+C), you'll see a summary of all received webhooks and be prompted to save them to a JSON file. This file can be used for later analysis or debugging.
+Received webhooks are automatically saved to the configured output file in JSON format. Each webhook entry includes:
+- Timestamp
+- Path
+- Headers
+- Payload
+- Signature details
+- Event type
 
-## Example Output
-
-![example](./ksnip_20250422-170011.png)
-
-
-
+When you stop the webhook tester (by pressing Ctrl+C), you'll see a summary of all received webhooks during that session.
 
 ## Troubleshooting
 
-- **No webhooks being displayed**: Make sure verbose mode is enabled
+- **Need more detailed information**: Set `log_level` to `"DEBUG"` in your configuration
 - **Signature verification fails**: Check that the shared secret matches between sender and receiver
-- **Can't receive external webhooks**: Ensure your server is accessible from the internet (e.g., using ngrok)
+- **Can't receive external webhooks**: Ensure your server is accessible from the internet (e.g., using localtunnel)
 - **JSON parsing errors**: Ensure the webhook payload is valid JSON
+- **Need to start fresh**: Set `truncate_output` to `true` in your configuration
