@@ -76,17 +76,23 @@ python webhook_tester.py --config my_custom_config.json
 
 ### Using with External Services
 
-To receive webhooks from external services, you'll need to expose your local server to the internet. You can use a tool like [localtunnel](https://theboroer.github.io/localtunnel-www/):
+To receive webhooks from external services, you'll need to expose your local server to the internet. You can use a tool like [smee.io](https://smee.io/):
 
 ```bash
-# Install localtunnel if you haven't already
-npm install -g localtunnel
 
-# Then expose your webhook tester
-lt --port 7999
+```bash
+# Install smee-client if you haven't already
+npm install -g smee-client
+
+# Create a new channel on smee.io (or use an existing one)
+# Visit https://smee.io/ and click "Start a new channel"
+# You'll get a URL like https://smee.io/U3bZl3QanVw30bn
+
+# Start the forwarding client
+smee --url https://smee.io/U3bZl3QanVw30bn --target http://localhost:7999
 ```
 
-Use the URL provided by localtunnel as your webhook endpoint in the external service.
+Use the URL provided by smee.io as your webhook url that voltage will hit with events
 
 ## Signature Verification
 
