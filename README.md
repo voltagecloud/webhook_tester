@@ -89,7 +89,7 @@ npm install -g smee-client
 # You'll get a URL like https://smee.io/U3bZl3QanVw30bn
 
 # Start the forwarding client
-smee --url https://smee.io/U3bZl3QanVw30bn --target http://localhost:7999
+smee --url https://smee.io/U3bZl3QanVw30bn --target http://127.0.0.1:7999
 ```
 
 Use the URL provided by smee.io as your webhook url that voltage will hit with events
