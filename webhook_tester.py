@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Dict, Any, Optional, List, cast
 import logging
 import os
+import time
 import sys
 
 
@@ -220,11 +221,131 @@ def setup_logging(level):
     root_logger.addHandler(handler)
 
 
+
+
+def validate_webhooks(input_file: str, expected_events: List[str], timeout: int = 60, poll_interval: int = 2) -> int:
+    """
+    Validate captured webhooks from an output file.
+    
+    Args:
+        input_file: Path to the webhooks JSON file
+        expected_events: List of expected event types (e.g., ['send.succeeded', 'receive.succeeded'])
+        timeout: Maximum seconds to wait for webhooks
+        poll_interval: Seconds between checks
+    
+    Returns:
+        0 on success, 1 on failure
+    """
+    print(f"Waiting for webhooks (timeout: {timeout}s)...")
+    if expected_events:
+        print(f"Expected events: {', '.join(expected_events)}")
+    print()
+    
+    start_time = time.time()
+    
+    while time.time() - start_time < timeout:
+        if os.path.exists(input_file) and os.path.getsize(input_file) > 2:
+            try:
+                with open(input_file, 'r') as f:
+                    webhooks = json.load(f)
+                
+                if not webhooks:
+                    elapsed = int(time.time() - start_time)
+                    print(f"Waiting for webhooks... ({elapsed}/{timeout}s)")
+                    time.sleep(poll_interval)
+                    continue
+                
+                print("=" * 60)
+                print("WEBHOOKS RECEIVED")
+                print("=" * 60)
+                print()
+                
+                errors = []
+                seen_events = set()
+                
+                for i, wh in enumerate(webhooks, 1):
+                    event_type = wh.get('event_type') or wh.get('payload', {}).get('event_type', 'unknown')
+                    sig_valid = wh.get('signature_valid')
+                    timestamp = wh.get('timestamp', 'unknown')
+                    
+                    seen_events.add(event_type)
+                    
+                    print(f"  [{i}] Event: {event_type}")
+                    print(f"      Timestamp: {timestamp}")
+                    if sig_valid is not None:
+                        print(f"      Signature: {'valid' if sig_valid else 'INVALID'}")
+                        if not sig_valid:
+                            errors.append(f"Webhook {i} ({event_type}) has invalid signature")
+                    print()
+                
+                if expected_events:
+                    expected_set = set(expected_events)
+                    missing = expected_set - seen_events
+                    received = expected_set & seen_events
+                    
+                    if received:
+                        print(f"Received expected events: {received}")
+                    
+                    if missing:
+                        print(f"WARNING: Expected events not seen: {missing}")
+                        print("         (This may be OK if the webhook is not configured for these events)")
+                    print()
+                
+                if errors:
+                    print("ERRORS:")
+                    for err in errors:
+                        print(f"  - {err}")
+                    return 1
+                
+                print(f"Validation passed! ({len(webhooks)} webhook(s) received)")
+                return 0
+                
+            except json.JSONDecodeError:
+                pass
+        
+        elapsed = int(time.time() - start_time)
+        print(f"Waiting for webhooks... ({elapsed}/{timeout}s)")
+        time.sleep(poll_interval)
+    
+    print()
+    print("=" * 60)
+    print(f"ERROR: No webhooks received within {timeout}s")
+    print("=" * 60)
+    print()
+    print("This could mean:")
+    print("  1. The webhook is not configured for the wallet")
+    print("  2. The webhook URL doesn't match the expected URL")
+    print("  3. The webhook is in 'stopped' state")
+    print("  4. The webhook delivery service is not running")
+    return 1
+
 def main():
     parser = argparse.ArgumentParser(description='Simple webhook receiver for testing webhooks')
     parser.add_argument('--config', type=str, default='webhook_config.json', help='Configuration file path')
+    
+    # Validation mode arguments
+    parser.add_argument('--validate', action='store_true', help='Run in validation mode (check captured webhooks)')
+    parser.add_argument('--input-file', type=str, help='Input file for validation mode')
+    parser.add_argument('--expected-events', type=str, help='Comma-separated list of expected event types')
+    parser.add_argument('--timeout', type=int, default=60, help='Timeout in seconds for validation mode')
+    parser.add_argument('--poll-interval', type=int, default=2, help='Poll interval in seconds for validation mode')
 
     args = parser.parse_args()
+
+    
+    # Handle validation mode
+    if args.validate:
+        if not args.input_file:
+            print("ERROR: --input-file is required for validation mode")
+            sys.exit(1)
+        
+        expected = args.expected_events.split(",") if args.expected_events else []
+        sys.exit(validate_webhooks(
+            input_file=args.input_file,
+            expected_events=expected,
+            timeout=args.timeout,
+            poll_interval=args.poll_interval
+        ))
 
     if not os.path.exists(args.config):
         config = create_default_config(args.config)
